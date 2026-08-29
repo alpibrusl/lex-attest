@@ -1,0 +1,47 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lex
+        run: |
+          set -euo pipefail
+          V=0.10.12; T=x86_64-unknown-linux-gnu
+          curl -fsSL "https://github.com/alpibrusl/lex-lang/releases/download/v$V/lex-v$V-$T.tar.gz" -o /tmp/lex.tgz
+          tar -xzf /tmp/lex.tgz -C /tmp
+          echo "/tmp/lex-v$V-$T" >> "$GITHUB_PATH"
+      - run: lex pkg install
+      - name: Type-check
+        run: |
+          set -e
+          for f in src/*.lex; do lex check "$f" >/dev/null || { echo "::error file=$f::lex check failed"; lex check "$f" | head -3; exit 1; }; done
+      - run: lex fmt --check src/ tests/
+      # `io` is the whole list, for the suite's own failure reporting.
+      # src/auth.lex and src/codec.lex are effect-free by construction — that
+      # is why they are separate from src/server.lex. If this needs to grow,
+      # something testable has been folded back into a handler.
+      - run: lex test --allow-effects io tests/
+
+      # The sidecar's whole claim is that a caller in any language can use it
+      # over HTTP. Asserting that in CI, with curl, is the only way to know it
+      # is still true.
+      - name: A caller with no Lex can chain and walk
+        run: |
+          set -euo pipefail
+          ATTEST_KEY=ci-key DB_PATH=/tmp/ci.db PORT=8099 \
+            lex run --allow-effects net,io,time,env,sql,fs_read,fs_write,concurrent,random,crypto,llm,proc,approval \
+            src/server.lex main > /tmp/attest.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8099/health >/dev/null && break; sleep 1; done
+          curl -sf localhost:8099/health | grep -q '"ok":true'
+          # Fail-closed: no token, no write.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8099/v1/events -d '{"kind":"x"}')" = 401
+          A1=$(curl -sf -X POST localhost:8099/v1/events -H 'Authorization: Bearer ci-key' \
+                 -d '{"kind":"meter.reading","payload":{"register_wh":105500}}' | jq -r .id)
+          A2=$(curl -sf -X POST localhost:8099/v1/events -H 'Authorization: Bearer ci-key' \
+                 -d "{\"kind\":\"settlement.energy\",\"parent\":\"$A1\",\"payload\":{\"eur_cents\":1064}}" | jq -r .id)
+          test "$(curl -sf "localhost:8099/v1/events/$A2/chain" -H 'Authorization: Bearer ci-key' | jq 'length')" = 2
+          curl -sf "localhost:8099/v1/events/$A2/chain" -H 'Authorization: Bearer ci-key' | jq -r '.[].kind' | grep -q meter.reading

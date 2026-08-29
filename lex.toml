@@ -1,0 +1,19 @@
+[package]
+name    = "lex-attest"
+version = "0.1.0"
+lex     = "0.10.12"
+
+# Attestation sidecar.
+#
+# lex-trail and lex-device-identity are Lex libraries: to use them you write
+# Lex. This wraps them in JSON over HTTP so a system in any language can append
+# to a hash chain, walk it, and verify a signed reading — without adopting the
+# platform, and without the sidecar reaching into anything of theirs. It owns
+# one database and answers questions; it initiates nothing.
+
+[dependencies]
+lex-schema          = { git = "https://github.com/alpibrusl/lex-schema" }
+lex-web             = { git = "https://github.com/alpibrusl/lex-web" }
+lex-orm             = { git = "https://github.com/alpibrusl/lex-orm" }
+lex-trail           = { git = "https://github.com/alpibrusl/lex-trail" }
+lex-device-identity = { git = "https://github.com/alpibrusl/lex-device-identity" }
