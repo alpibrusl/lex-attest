@@ -4,12 +4,22 @@
 #   GET  /v1/events/:id/chain  walk from an event to the root of its chain
 #   GET  /v1/events            everything in a time window
 #   POST /v1/verify            check a signed reading against its device certificate
+#   POST /v1/anchors           commit to everything up to now — publish this elsewhere
+#   POST /v1/anchors/verify    does this log still reproduce an anchor you hold?
 #   GET  /health               liveness, unauthenticated
 #
 # Configuration:
 #   ATTEST_KEY  bearer token. REQUIRED — unset means everything but /health is refused.
 #   DB_PATH     SQLite file (default ./attest.db), or DB_URL for Postgres
 #   PORT        default 8090
+#
+# Anchors are why this can be run BY someone other than the party relying on
+# it. Everything else here is only as trustworthy as whoever holds the
+# database: they could delete an event nobody kept the id of, or rewrite the
+# lot and recompute every id so it stays internally coherent. An anchor is a
+# small commitment the caller takes away and keeps — or publishes somewhere the
+# holder does not control. Afterwards the holder can still change the data;
+# they cannot make the anchor reproduce.
 #
 # The point of this service is what it does NOT do. It holds one database of
 # its own, it answers questions about that database, and it never reaches into
@@ -42,6 +52,8 @@ import "lex-orm/connection" as conn
 import "lex-trail/log" as tlog
 
 import "lex-trail/replay" as replay
+
+import "lex-trail/anchor" as anchor
 
 import "lex-device-identity/src/device_identity" as di
 
@@ -149,6 +161,44 @@ fn handle_verify(c :: ctx.Ctx, now_ms :: Int) -> [crypto] resp.Response {
   }
 }
 
+# Commit to the log as it stands. The caller is expected to STORE what comes
+# back, somewhere this service cannot reach — that is the entire mechanism, and
+# an anchor left sitting in the database it commits to is worth nothing.
+fn handle_anchor(now_ms :: Int, log :: tlog.Log) -> [sql, crypto] resp.Response {
+  match anchor.compute(log, now_ms) {
+    Err(e) => resp.json_status(500, codec.err(str.concat("anchor failed: ", e))),
+    Ok(a) => resp.json_status(201, anchor.to_json(a)),
+  }
+}
+
+# Hand back an anchor taken earlier and find out whether this log still
+# reproduces it. A `false` here means the log changed inside a window that was
+# supposed to be closed — by anyone, including whoever runs this service.
+fn handle_anchor_verify(c :: ctx.Ctx, log :: tlog.Log) -> [sql, crypto] resp.Response {
+  match jv.parse(c.body) {
+    Err(_) => resp.bad_request(codec.err("body is not JSON")),
+    Ok(j) => {
+      let digest := codec.field(j, "digest")
+      if str.is_empty(digest) {
+        resp.bad_request(codec.err("digest is required — send back the anchor you were given"))
+      } else {
+        let a := { up_to_ms: int_field(j, "up_to_ms", 0), count: int_field(j, "count", 0), digest: digest }
+        match anchor.verify(log, a) {
+          Match => resp.json("{\"reproduces\":true}"),
+          Diverged(d) => resp.json(jv.stringify(JObj([("reproduces", JBool(false)), ("expected_count", JInt(d.expected_count)), ("actual_count", JInt(d.actual_count)), ("expected_digest", JStr(d.expected_digest)), ("actual_digest", JStr(d.actual_digest))]))),
+        }
+      }
+    },
+  }
+}
+
+fn int_field(j :: jv.Json, key :: Str, fallback :: Int) -> Int {
+  match jv.get_field(j, key) {
+    Some(JInt(n)) => n,
+    _ => fallback,
+  }
+}
+
 fn build_router(log :: tlog.Log, key :: Str) -> router.Router {
   let r := router.new()
   let r := router.route_effectful(r, "POST", "/v1/events", fn (c :: ctx.Ctx) -> [io, time, crypto, random, sql, fs_read, fs_write, net, concurrent, llm, proc, approval] resp.Response {
@@ -175,6 +225,20 @@ fn build_router(log :: tlog.Log, key :: Str) -> router.Router {
   let r := router.route_effectful(r, "POST", "/v1/verify", fn (c :: ctx.Ctx) -> [io, time, crypto, random, sql, fs_read, fs_write, net, concurrent, llm, proc, approval] resp.Response {
     if auth.authed(key, c) {
       handle_verify(c, time.now_ms())
+    } else {
+      resp.unauthorized(auth.refusal(key))
+    }
+  })
+  let r := router.route_effectful(r, "POST", "/v1/anchors", fn (c :: ctx.Ctx) -> [io, time, crypto, random, sql, fs_read, fs_write, net, concurrent, llm, proc, approval] resp.Response {
+    if auth.authed(key, c) {
+      handle_anchor(time.now_ms(), log)
+    } else {
+      resp.unauthorized(auth.refusal(key))
+    }
+  })
+  let r := router.route_effectful(r, "POST", "/v1/anchors/verify", fn (c :: ctx.Ctx) -> [io, time, crypto, random, sql, fs_read, fs_write, net, concurrent, llm, proc, approval] resp.Response {
+    if auth.authed(key, c) {
+      handle_anchor_verify(c, log)
     } else {
       resp.unauthorized(auth.refusal(key))
     }

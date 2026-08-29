@@ -45,3 +45,19 @@ jobs:
                  -d "{\"kind\":\"settlement.energy\",\"parent\":\"$A1\",\"payload\":{\"eur_cents\":1064}}" | jq -r .id)
           test "$(curl -sf "localhost:8099/v1/events/$A2/chain" -H 'Authorization: Bearer ci-key' | jq 'length')" = 2
           curl -sf "localhost:8099/v1/events/$A2/chain" -H 'Authorization: Bearer ci-key' | jq -r '.[].kind' | grep -q meter.reading
+
+      # The claim that makes this hostable by someone other than the party
+      # relying on it: a customer who keeps an anchor can catch the HOST
+      # tampering. Tamper with the database directly, behind the API, and
+      # require the anchor to notice.
+      - name: An anchor catches the host tampering
+        run: |
+          set -euo pipefail
+          H='Authorization: Bearer ci-key'
+          curl -sf -X POST localhost:8099/v1/events -H "$H" -d '{"kind":"a","payload":{"n":1}}' >/dev/null
+          curl -sf -X POST localhost:8099/v1/events -H "$H" -d '{"kind":"b","payload":{"n":2}}' >/dev/null
+          ANCHOR=$(curl -sf -X POST localhost:8099/v1/anchors -H "$H")
+          test "$(curl -sf -X POST localhost:8099/v1/anchors/verify -H "$H" -d "$ANCHOR" | jq -r .reproduces)" = true
+          # Delete a row straight out of the file the service is serving.
+          python3 -c "import sqlite3;c=sqlite3.connect('/tmp/ci.db');c.execute(\"DELETE FROM events WHERE kind='b'\");c.commit()"
+          test "$(curl -sf -X POST localhost:8099/v1/anchors/verify -H "$H" -d "$ANCHOR" | jq -r .reproduces)" = false

@@ -40,7 +40,38 @@ curl -X POST localhost:8090/v1/verify -H 'Authorization: Bearer trial-key' \
 # {"verified":true}   or   {"verified":false,"reason":"…"}
 ```
 
+```bash
+# commit to the log as it stands — KEEP what comes back
+curl -X POST localhost:8090/v1/anchors -H 'Authorization: Bearer trial-key'
+# {"up_to_ms":1788016591481,"count":3,"digest":"a312c6ad…"}
+
+# later: does this log still reproduce the anchor you kept?
+curl -X POST localhost:8090/v1/anchors/verify -H 'Authorization: Bearer trial-key' \
+  -d '{"up_to_ms":1788016591481,"count":3,"digest":"a312c6ad…"}'
+# {"reproduces":true}
+```
+
 `GET /health` is unauthenticated. Everything else needs the bearer token.
+
+## Anchors, and why you can run this for someone else
+
+Everything above is only as trustworthy as whoever holds the database. They can delete an event nobody kept the id of; or rewrite the lot and recompute every id so it stays internally coherent. A chain's head id does not catch either — it commits to one chain's ancestry, not to the absence of deletions.
+
+An anchor does. It is a small commitment — `{up_to_ms, count, digest}` — that the caller **takes away and keeps**, ideally somewhere the holder cannot reach: their own system, a counterparty's, a timestamping authority, a printed report. The holder can still change the data afterwards. They cannot make the anchor reproduce.
+
+Concretely — the host deleting a settlement straight out of its own database file, behind the API:
+
+```
+$ curl /v1/events            # the API answers normally
+  events now visible: 2      # nothing looks wrong
+
+$ curl -X POST /v1/anchors/verify -d "$ANCHOR"
+{ "reproduces": false, "expected_count": 3, "actual_count": 2, … }
+```
+
+That is what makes this hostable by a party other than the one relying on it, and it is asserted in CI on every push.
+
+**Its limits, plainly.** An anchor says nothing about events appended after its window, and it cannot tell you *which* event changed — only that the set is no longer the one you were shown. An anchor left sitting in the database it commits to is worth nothing.
 
 ## The id is the content
 
