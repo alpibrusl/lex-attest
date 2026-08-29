@@ -61,3 +61,34 @@ jobs:
           # Delete a row straight out of the file the service is serving.
           python3 -c "import sqlite3;c=sqlite3.connect('/tmp/ci.db');c.execute(\"DELETE FROM events WHERE kind='b'\");c.commit()"
           test "$(curl -sf -X POST localhost:8099/v1/anchors/verify -H "$H" -d "$ANCHOR" | jq -r .reproduces)" = false
+
+      # Publishing is the half that makes an anchor worth taking: one left in
+      # the database it commits to proves nothing. A stand-in counterparty
+      # records what it is sent, and the copy IT holds is then used to catch
+      # the host.
+      - name: A counterparty's copy of the anchor catches the host
+        run: |
+          set -euo pipefail
+          H='Authorization: Bearer ci-key'
+          python3 - <<'PYEOF' &
+          import http.server
+          class Hk(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  n = int(self.headers.get('Content-Length', 0))
+                  open('/tmp/received.json','wb').write(self.rfile.read(n))
+                  self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+              def log_message(self, *a): pass
+          http.server.HTTPServer(('127.0.0.1', 8097), Hk).serve_forever()
+          PYEOF
+          sleep 2
+          curl -sf -X POST localhost:8099/v1/events -H "$H" -d '{"kind":"c","payload":{"n":3}}' >/dev/null
+          curl -sf -X POST localhost:8099/v1/anchors/publish -H "$H" \
+            -d '{"kind":"webhook","url":"http://127.0.0.1:8097/anchors"}' | jq -e '.outcome.published == true' >/dev/null
+          # The counterparty holds this, not us.
+          test -s /tmp/received.json
+          test "$(curl -sf -X POST localhost:8099/v1/anchors/verify -H "$H" -d @/tmp/received.json | jq -r .reproduces)" = true
+          python3 -c "import sqlite3;c=sqlite3.connect('/tmp/ci.db');c.execute(\"DELETE FROM events WHERE kind='c'\");c.commit()"
+          test "$(curl -sf -X POST localhost:8099/v1/anchors/verify -H "$H" -d @/tmp/received.json | jq -r .reproduces)" = false
+          # A destination that cannot work is refused before anything is sent.
+          curl -sf -X POST localhost:8099/v1/anchors/publish -H "$H" \
+            -d '{"kind":"webhook","url":"not-a-url"}' | jq -e '.outcome.published == false' >/dev/null

@@ -24,6 +24,8 @@ import "../src/auth" as auth
 
 import "../src/codec" as codec
 
+import "../src/destination" as dest
+
 fn assert_true(cond :: Bool, label :: Str) -> Result[Unit, Str] {
   if cond {
     Ok(())
@@ -118,8 +120,61 @@ fn test_the_error_envelope_is_parseable() -> Result[Unit, Str] {
   }
 }
 
+# ---- where an anchor goes ------------------------------------------
+# A calendar is a public service that should learn as little as possible: it
+# gets the digest and nothing else. The window and the event count are the
+# caller's business, and a webhook — a counterparty's own system — gets them.
+fn test_a_calendar_learns_only_the_digest() -> Result[Unit, Str] {
+  let ots := OpenTimestamps({ calendar: "https://a.pool.opentimestamps.org" })
+  let sent := dest.body_for(ots, "{\"count\":3,\"digest\":\"abc\"}", "abc")
+  assert_true(sent == "abc" and not str.contains(sent, "count"), str.concat("a calendar must receive the digest alone, got ", sent))
+}
+
+fn test_a_webhook_receives_the_whole_anchor() -> Result[Unit, Str] {
+  let wh := Webhook({ url: "https://counterparty.example/anchors" })
+  let sent := dest.body_for(wh, "{\"count\":3,\"digest\":\"abc\"}", "abc")
+  assert_true(str.contains(sent, "count") and str.contains(sent, "digest"), "a counterparty's system receives the anchor it has to store")
+}
+
+# A calendar URL with and without a trailing slash must produce one endpoint,
+# or half the callers get a double slash and a 404 they cannot explain.
+fn test_a_trailing_slash_does_not_change_the_endpoint() -> Result[Unit, Str] {
+  let a := dest.endpoint(OpenTimestamps({ calendar: "https://cal.example/" }))
+  let b := dest.endpoint(OpenTimestamps({ calendar: "https://cal.example" }))
+  assert_true(a == b and a == "https://cal.example/digest", str.concat("both forms must yield one endpoint, got ", a))
+}
+
+fn test_a_webhook_posts_where_it_was_told() -> Result[Unit, Str] {
+  assert_true(dest.endpoint(Webhook({ url: "https://x.example/hook" })) == "https://x.example/hook", "a webhook posts to exactly the configured URL, with nothing appended")
+}
+
+# Misconfiguration must be caught when it is configured, not at the moment
+# somebody needed the anchor and got a confusing transport error.
+fn test_an_unusable_destination_is_refused_up_front() -> Result[Unit, Str] {
+  let empty := match dest.problem(Webhook({ url: "" })) {
+    Some(_) => true,
+    None => false,
+  }
+  let scheme := match dest.problem(OpenTimestamps({ calendar: "cal.example" })) {
+    Some(_) => true,
+    None => false,
+  }
+  let fine := match dest.problem(Webhook({ url: "https://x.example/h" })) {
+    Some(_) => false,
+    None => true,
+  }
+  assert_true(empty and scheme and fine, "an empty URL and a schemeless one are refused; a real one is not")
+}
+
+fn test_an_unknown_destination_kind_is_named() -> Result[Unit, Str] {
+  match dest.parse("carrier-pigeon", "https://x.example") {
+    Ok(_) => Err("an unknown destination kind must not be accepted"),
+    Err(why) => assert_true(str.contains(why, "carrier-pigeon"), str.concat("the refusal must name the kind it did not know, got ", why)),
+  }
+}
+
 fn results() -> List[(Str, Result[Unit, Str])] {
-  [("an_unset_key_refuses_everything", test_an_unset_key_refuses_everything()), ("the_configured_key_is_admitted", test_the_configured_key_is_admitted()), ("anything_but_the_key_is_refused", test_anything_but_the_key_is_refused()), ("the_refusal_says_which_problem_it_is", test_the_refusal_says_which_problem_it_is()), ("absent_and_empty_parent_both_mean_root", test_absent_and_empty_parent_both_mean_root()), ("a_real_parent_is_carried", test_a_real_parent_is_carried()), ("the_same_object_canonicalises_the_same_way", test_the_same_object_canonicalises_the_same_way()), ("a_missing_payload_is_an_empty_object", test_a_missing_payload_is_an_empty_object()), ("the_payload_is_a_value_not_a_string", test_the_payload_is_a_value_not_a_string()), ("the_error_envelope_is_parseable", test_the_error_envelope_is_parseable())]
+  [("an_unset_key_refuses_everything", test_an_unset_key_refuses_everything()), ("the_configured_key_is_admitted", test_the_configured_key_is_admitted()), ("anything_but_the_key_is_refused", test_anything_but_the_key_is_refused()), ("the_refusal_says_which_problem_it_is", test_the_refusal_says_which_problem_it_is()), ("absent_and_empty_parent_both_mean_root", test_absent_and_empty_parent_both_mean_root()), ("a_real_parent_is_carried", test_a_real_parent_is_carried()), ("the_same_object_canonicalises_the_same_way", test_the_same_object_canonicalises_the_same_way()), ("a_missing_payload_is_an_empty_object", test_a_missing_payload_is_an_empty_object()), ("the_payload_is_a_value_not_a_string", test_the_payload_is_a_value_not_a_string()), ("the_error_envelope_is_parseable", test_the_error_envelope_is_parseable()), ("a_calendar_learns_only_the_digest", test_a_calendar_learns_only_the_digest()), ("a_webhook_receives_the_whole_anchor", test_a_webhook_receives_the_whole_anchor()), ("a_trailing_slash_does_not_change_the_endpoint", test_a_trailing_slash_does_not_change_the_endpoint()), ("a_webhook_posts_where_it_was_told", test_a_webhook_posts_where_it_was_told()), ("an_unusable_destination_is_refused_up_front", test_an_unusable_destination_is_refused_up_front()), ("an_unknown_destination_kind_is_named", test_an_unknown_destination_kind_is_named())]
 }
 
 fn report(rs :: List[(Str, Result[Unit, Str])]) -> [io] Int {

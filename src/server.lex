@@ -6,6 +6,7 @@
 #   POST /v1/verify            check a signed reading against its device certificate
 #   POST /v1/anchors           commit to everything up to now — publish this elsewhere
 #   POST /v1/anchors/verify    does this log still reproduce an anchor you hold?
+#   POST /v1/anchors/publish   take an anchor and send it somewhere we cannot reach
 #   GET  /health               liveness, unauthenticated
 #
 # Configuration:
@@ -60,6 +61,10 @@ import "lex-device-identity/src/device_identity" as di
 import "./auth" as auth
 
 import "./codec" as codec
+
+import "./destination" as dest
+
+import "./publish" as publish
 
 fn port() -> [env] Int {
   match env.get("PORT") {
@@ -199,6 +204,32 @@ fn int_field(j :: jv.Json, key :: Str, fallback :: Int) -> Int {
   }
 }
 
+# Take an anchor and publish it, in one call, because the two halves are only
+# useful together: an anchor that stays here commits to a database its own
+# holder controls, which is worth nothing.
+#
+# The publication is itself appended to the chain. That is not ceremony — it
+# means the log carries a record of what was committed and where it was sent,
+# so a later dispute can start from "you published this digest to that
+# counterparty on that date" rather than from someone's filing.
+fn handle_anchor_publish(c :: ctx.Ctx, now_ms :: Int, log :: tlog.Log) -> [sql, crypto, time, net] resp.Response {
+  match jv.parse(c.body) {
+    Err(_) => resp.bad_request(codec.err("body is not JSON")),
+    Ok(j) => match dest.parse(codec.field(j, "kind"), codec.field(j, "url")) {
+      Err(why) => resp.bad_request(codec.err(why)),
+      Ok(d) => match anchor.compute(log, now_ms) {
+        Err(e) => resp.json_status(500, codec.err(str.concat("anchor failed: ", e))),
+        Ok(a) => {
+          let outcome := publish.publish(d, anchor.to_json(a), a.digest)
+          let note := jv.stringify(JObj([("destination", JStr(dest.describe(d))), ("digest", JStr(a.digest)), ("count", JInt(a.count)), ("up_to_ms", JInt(a.up_to_ms))]))
+          let __rec := tlog.append(log, "anchor.published", None, note)
+          resp.json(str.join(["{\"anchor\":", anchor.to_json(a), ",\"outcome\":", dest.outcome_json(outcome), "}"], ""))
+        },
+      },
+    },
+  }
+}
+
 fn build_router(log :: tlog.Log, key :: Str) -> router.Router {
   let r := router.new()
   let r := router.route_effectful(r, "POST", "/v1/events", fn (c :: ctx.Ctx) -> [io, time, crypto, random, sql, fs_read, fs_write, net, concurrent, llm, proc, approval] resp.Response {
@@ -239,6 +270,13 @@ fn build_router(log :: tlog.Log, key :: Str) -> router.Router {
   let r := router.route_effectful(r, "POST", "/v1/anchors/verify", fn (c :: ctx.Ctx) -> [io, time, crypto, random, sql, fs_read, fs_write, net, concurrent, llm, proc, approval] resp.Response {
     if auth.authed(key, c) {
       handle_anchor_verify(c, log)
+    } else {
+      resp.unauthorized(auth.refusal(key))
+    }
+  })
+  let r := router.route_effectful(r, "POST", "/v1/anchors/publish", fn (c :: ctx.Ctx) -> [io, time, crypto, random, sql, fs_read, fs_write, net, concurrent, llm, proc, approval] resp.Response {
+    if auth.authed(key, c) {
+      handle_anchor_publish(c, time.now_ms(), log)
     } else {
       resp.unauthorized(auth.refusal(key))
     }

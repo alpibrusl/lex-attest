@@ -71,6 +71,25 @@ $ curl -X POST /v1/anchors/verify -d "$ANCHOR"
 
 That is what makes this hostable by a party other than the one relying on it, and it is asserted in CI on every push.
 
+### Publishing it
+
+An anchor left in the database it commits to is worth nothing, so the service will send it somewhere for you:
+
+```bash
+curl -X POST localhost:8090/v1/anchors/publish -H 'Authorization: Bearer trial-key' \
+  -d '{"kind":"webhook","url":"https://counterparty.example/anchors"}'
+# {"anchor":{…},"outcome":{"published":true,"destination":"webhook https://…","detail":"HTTP 200"}}
+```
+
+| destination | what it gives you |
+|---|---|
+| `webhook` | POST to a URL the counterparty controls. Free, no third party, and it settles the case that actually matters: two parties who will later disagree, each holding the same commitment from before they disagreed. |
+| `opentimestamps` | POST the digest to a public calendar, which commits it into Bitcoin. No wallet, no gas, no transaction to build — this is blockchain anchoring, reached over HTTP. |
+
+The publication is itself appended to the chain as `anchor.published`, so the log records what was committed and where it went. A later dispute starts from *"you published this digest to that counterparty on that date"* rather than from somebody's filing.
+
+**Two destinations are missing, and both are real work rather than oversights.** A direct EVM transaction carrying the digest: the crypto is all present (keccak256, secp256k1, hex) but there is no RLP encoder in the ecosystem, so the transaction encoder must be written and tested against a testnet before anyone trusts it with a key. And an **RFC 3161 / eIDAS qualified timestamp** — legally recognised in the EU and the strongest option for a European product — where the request is a small DER structure but the response is CMS SignedData, and there is no ASN.1 support to build the parser on.
+
 **Its limits, plainly.** An anchor says nothing about events appended after its window, and it cannot tell you *which* event changed — only that the set is no longer the one you were shown. An anchor left sitting in the database it commits to is worth nothing.
 
 ## The id is the content
