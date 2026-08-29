@@ -18,6 +18,9 @@
 #                    commitment, and hands back a proof. This is blockchain
 #                    anchoring, reached over HTTP.
 #
+# `Outcome` carries the destination as well as the verdict, so a caller
+# publishing to several places can tell which one refused.
+#
 # Two more are worth having and are NOT here, because neither is a small piece
 # of work and pretending otherwise would be worse than the gap:
 #
@@ -40,8 +43,6 @@ import "std.int" as int
 # A place an anchor can be published.
 type Destination = Webhook({ url :: Str }) | OpenTimestamps({ calendar :: Str })
 
-# What happened. Carries the destination so a caller publishing to several can
-# tell which one refused.
 type Outcome = Published({ destination :: Str, detail :: Str }) | Failed({ destination :: Str, why :: Str })
 
 fn describe(d :: Destination) -> Str {
@@ -129,3 +130,4 @@ fn outcome_json(o :: Outcome) -> Str {
     Failed(f) => str.join(["{\"published\":false,\"destination\":\"", f.destination, "\",\"error\":\"", f.why, "\"}"], ""),
   }
 }
+
